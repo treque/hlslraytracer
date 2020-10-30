@@ -1,0 +1,96 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> Result;
+float4x4 CameraToWorld;
+float4x4 CameraInverseProjection;
+
+Texture2D<float4> SkyboxTexture;
+SamplerState sampler_SkyboxTexture;
+static const float PI = 3.14159265f;
+
+struct Ray
+{
+    float3 o;
+    float3 d;
+};
+
+struct RayHit
+{
+    float3 pos;
+    float3 distance;
+    float3 n;
+};
+
+RayHit ConstructRayHit()
+{
+    RayHit hit;
+    hit.pos = float3(0.0f, 0.0f, 0.0f);
+    hit.distance = 1.#INF;
+    hit.n = float3(0.0f, 0.0f, 0.0f);
+    return hit;
+};
+
+
+// for an infinite plane at y=0
+void IntersectGroundPlane(Ray ray, inout RayHit bestHit)
+{
+    // distance along ray where plane is intersected
+    float t = -ray.o.y / ray.d.y;
+    if (t > 0 && t < bestHit.distance)
+    {
+        bestHit.distance = t;
+        bestHit.pos = ray.o * t * ray.d;
+        bestHit.n = float3(0.0f, 1.0f, 0.0f);
+    }
+}
+
+RayHit Trace(Ray ray)
+{
+    RayHit bestHit = CreateRayHit();
+    IntersectGroundPlane(ray, bestHit);
+    return bestHit;
+}
+
+
+Ray ConstructRay(float3 origin, float3 direction)
+{
+    Ray ray;
+    ray.o = origin;
+    ray.d = direction;
+    return ray;
+}
+
+Ray ConstructCameraRay(float2 uv)
+{
+    // transform camera origin to world space
+    float3 o = mul(CameraToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+
+    // u,v pixel from clip space to camera view space
+    float3 d = mul(CameraInverseProjection, float4(uv, 0.0f, 1.0f)).xyz;
+    // get those uvs in world space
+    d = mul(CameraToWorld, float4(d, 0.0f)).xyz;
+    d = normalize(d);
+
+    return ConstructRay(o, d);
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    uint w, h;
+    // as defined here RayTracingShader.SetTexture(0, "Result", target);
+    Result.GetDimensions(w, h);
+
+    // transform pixel to [-1,1] range
+    float2 uv = float2((id.xy + float2(0.5f, 0.5f)) / float2(w, h) * 2.0f - 1.0f);
+
+    Ray ray = ConstructCameraRay(uv);
+
+    float theta = acos(ray.d.y) / -PI;
+    float phi = atan2(ray.d.x, -ray.d.z) / -PI * 0.5f;
+
+    Result[id.xy] = SkyboxTexture.SampleLevel(sampler_SkyboxTexture, float2(phi, theta), 0);
+}
