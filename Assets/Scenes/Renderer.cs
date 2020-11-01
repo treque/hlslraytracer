@@ -6,23 +6,46 @@ public class Renderer : MonoBehaviour
 {
     public ComputeShader RayTracingShader;
     public Texture SkyboxTexture;
+    public int RayBounces = 8;
+    public Light DirectionalLight;
 
     RenderTexture target;
     Camera camera;
 
+    // AA (jitter)
+    uint currentSample = 0;
+    Material addMaterial;
 
-    private void Awake()
+    void Awake()
     {
         camera = GetComponent<Camera>();
     }
 
+    private void Update()
+    {
+        // si la camera bouge pas on va pas resample..
+        if (transform.hasChanged)
+        {
+            currentSample = 0;
+            transform.hasChanged = false;
+        }
+        if (DirectionalLight.transform.hasChanged)
+        {
+            currentSample = 0;
+            DirectionalLight.transform.hasChanged = false;
+        }
+    }
+
     void SetShaderParmameters()
     {
-        // equiv of uniform variables?
-        RayTracingShader.SetMatrix("CameraToWorld", camera.cameraToWorldMatrix);
-        // clip space -> view space
-        RayTracingShader.SetMatrix("CameraInverseProjection", camera.projectionMatrix.inverse);
-        RayTracingShader.SetTexture(0, "SkyboxTexture", SkyboxTexture);
+        // equiv of uniform variables
+        RayTracingShader.SetMatrix("_CameraToWorld", camera.cameraToWorldMatrix);
+        RayTracingShader.SetMatrix("_CameraInverseProjection", camera.projectionMatrix.inverse);
+        RayTracingShader.SetVector("_PixelOffset", new Vector2(Random.value, Random.value));
+        Vector3 l = DirectionalLight.transform.forward;
+        RayTracingShader.SetVector("_DirectionalLight", new Vector4(l.x, l.y, l.z, DirectionalLight.intensity));
+        RayTracingShader.SetInt("_RayBounces", RayBounces);
+        RayTracingShader.SetTexture(0, "_SkyboxTexture", SkyboxTexture);
     }
 
     // called whenevr camera is finished rendering
@@ -44,7 +67,10 @@ public class Renderer : MonoBehaviour
         int threadGroupsY = Mathf.CeilToInt(Screen.height / 8.0f);
         RayTracingShader.Dispatch(0, threadGroupsX, threadGroupsY, 1);
 
-        Graphics.Blit(target, destination);
+        if (addMaterial == null) addMaterial = new Material(Shader.Find("Hidden/AddShader"));
+        addMaterial.SetFloat("_Sample", currentSample);
+        Graphics.Blit(target, destination, addMaterial);
+        currentSample++;
     }
 
      void InitRenderTexture()

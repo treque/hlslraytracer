@@ -4,34 +4,70 @@
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
 RWTexture2D<float4> Result;
-float4x4 CameraToWorld;
-float4x4 CameraInverseProjection;
+float4x4 _CameraToWorld;
+float4x4 _CameraInverseProjection;
 
-Texture2D<float4> SkyboxTexture;
+Texture2D<float4> _SkyboxTexture;
 SamplerState sampler_SkyboxTexture;
 static const float PI = 3.14159265f;
+static const float INF = 999999999999.f;
+
+// AA jitter
+float2 _PixelOffset;
+
+int _RayBounces;
+
+float4 _DirectionalLight;
 
 struct Ray
 {
     float3 o;
     float3 d;
+    float3 e;
 };
 
 struct RayHit
 {
     float3 pos;
-    float3 distance;
+    float distance;
     float3 n;
 };
+
+Ray ConstructRay(float3 origin, float3 direction)
+{
+    Ray ray;
+    ray.o = origin;
+    ray.d = direction;
+    ray.e = float3(1.0f, 1.0f, 1.0f);
+    return ray;
+}
 
 RayHit ConstructRayHit()
 {
     RayHit hit;
     hit.pos = float3(0.0f, 0.0f, 0.0f);
-    hit.distance = 1.#INF;
+    hit.distance = INF;
     hit.n = float3(0.0f, 0.0f, 0.0f);
     return hit;
 };
+
+// float4 sphere - x,y,z center, w radius
+void IntersectSphere(Ray ray, inout RayHit bestHit, float4 sphere)
+{
+    float3 d = ray.o - sphere.xyz;
+    float p1 = -dot(ray.d, d);
+    float p2sqr = p1 * p1 - dot(d, d) + sphere.w * sphere.w;
+    if (p2sqr < 0)
+        return;
+    float p2 = sqrt(p2sqr);
+    float t = p1 - p2 > 0 ? p1 - p2 : p1 + p2;
+    if (t > 0 && t < bestHit.distance)
+    {
+        bestHit.distance = t;
+        bestHit.pos = ray.o + t * ray.d;
+        bestHit.n = normalize(bestHit.pos - sphere.xyz);
+    }
+}
 
 
 // for an infinite plane at y=0
@@ -42,39 +78,63 @@ void IntersectGroundPlane(Ray ray, inout RayHit bestHit)
     if (t > 0 && t < bestHit.distance)
     {
         bestHit.distance = t;
-        bestHit.pos = ray.o * t * ray.d;
+        bestHit.pos = ray.o + t * ray.d;
         bestHit.n = float3(0.0f, 1.0f, 0.0f);
     }
-}
-
-RayHit Trace(Ray ray)
-{
-    RayHit bestHit = CreateRayHit();
-    IntersectGroundPlane(ray, bestHit);
-    return bestHit;
-}
-
-
-Ray ConstructRay(float3 origin, float3 direction)
-{
-    Ray ray;
-    ray.o = origin;
-    ray.d = direction;
-    return ray;
 }
 
 Ray ConstructCameraRay(float2 uv)
 {
     // transform camera origin to world space
-    float3 o = mul(CameraToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+    float3 o = mul(_CameraToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
 
     // u,v pixel from clip space to camera view space
-    float3 d = mul(CameraInverseProjection, float4(uv, 0.0f, 1.0f)).xyz;
+    float3 d = mul(_CameraInverseProjection, float4(uv, 0.0f, 1.0f)).xyz;
     // get those uvs in world space
-    d = mul(CameraToWorld, float4(d, 0.0f)).xyz;
+    d = mul(_CameraToWorld, float4(d, 0.0f)).xyz;
     d = normalize(d);
 
     return ConstructRay(o, d);
+}
+
+RayHit Trace(Ray ray)
+{
+    RayHit bestHit = ConstructRayHit();
+    // creating a default plane y = 0
+    IntersectGroundPlane(ray, bestHit);
+    // creating a Sphere centered at 0, 3, 0 with a radius of 1
+    for (int i = 0; i < 10; ++i)
+    {
+        IntersectSphere(ray, bestHit, float4(2.0f * i, 2.0f, 2.0f * i, 1.0f));
+    }
+    return bestHit;
+}
+
+float3 Shade(inout Ray ray, RayHit hit)
+{
+    if (hit.distance < INF)
+    {
+        float3 matSpec = float3(0.6f, 0.6f, 0.6f);
+        float3 matAlbedo = float3(0.5f, 0.4f, 0.3f);
+        ray.o = hit.pos + hit.n * 0.001f; // floating point precision error, adding an offset along the normal
+        ray.d = reflect(ray.d, hit.n);
+        ray.e *= matSpec;
+        
+        //shadow ray
+        bool shadow = false;
+        Ray shadowRay = ConstructRay(hit.pos + hit.n * 0.001f, -1 * _DirectionalLight.xyz);
+        RayHit shadowHit = Trace(shadowRay);
+        if (shadowHit.distance != INF) return float3(0.0f, 0.0f, 0.0f);
+
+        return saturate(dot(hit.n, _DirectionalLight.xyz) * -1) * _DirectionalLight.w * matAlbedo;
+    }
+    else
+    {
+        ray.e = 0.0f;
+        float theta = acos(ray.d.y) / -PI;
+        float phi = atan2(ray.d.x, -ray.d.z) / -PI * 0.5f;
+        return _SkyboxTexture.SampleLevel(sampler_SkyboxTexture, float2(phi, theta), 0).xyz * 1.0f;
+    }
 }
 
 [numthreads(8,8,1)]
@@ -85,12 +145,16 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     Result.GetDimensions(w, h);
 
     // transform pixel to [-1,1] range
-    float2 uv = float2((id.xy + float2(0.5f, 0.5f)) / float2(w, h) * 2.0f - 1.0f);
+    float2 uv = float2((id.xy + _PixelOffset) / float2(w, h) * 2.0f - 1.0f);
 
     Ray ray = ConstructCameraRay(uv);
 
-    float theta = acos(ray.d.y) / -PI;
-    float phi = atan2(ray.d.x, -ray.d.z) / -PI * 0.5f;
-
-    Result[id.xy] = SkyboxTexture.SampleLevel(sampler_SkyboxTexture, float2(phi, theta), 0);
+    float3 result = float3(0, 0, 0);
+    for (int i = 0; i < _RayBounces; ++i)
+    {
+        RayHit hit = Trace(ray);
+        result += ray.e * Shade(ray, hit);
+        if (!any(ray.e)) break;
+    }
+    Result[id.xy] = float4(result, 1);
 }
