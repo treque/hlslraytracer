@@ -9,8 +9,14 @@ public class Renderer : MonoBehaviour
     public int RayBounces = 8;
     public Light DirectionalLight;
 
+    public Vector2 SphereRadii = new Vector2(3.0f, 8.0f);
+    public uint SpheresMax = 100;
+    public float SpherePlacementRadius = 100.0f;
+
     RenderTexture target;
     Camera camera;
+
+    ComputeBuffer _sphereBuffer;
 
     // AA (jitter)
     uint currentSample = 0;
@@ -78,7 +84,7 @@ public class Renderer : MonoBehaviour
         if (transform.hasChanged)
         {
             currentSample = 0;
-            transform.hasChanged = false;
+           transform.hasChanged = false;
         }
         if (DirectionalLight.transform.hasChanged)
         {

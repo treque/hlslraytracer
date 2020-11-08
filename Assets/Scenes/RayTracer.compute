@@ -1,6 +1,6 @@
 // Each #kernel tells which function to compile; you can have many kernels
 #pragma kernel CSMain
-
+#include "UnityCG.cginc"
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
 RWTexture2D<float4> Result;
@@ -12,12 +12,28 @@ SamplerState sampler_SkyboxTexture;
 static const float PI = 3.14159265f;
 static const float INF = 999999999999.f;
 
+// noise
+float _Timei;
+
 // AA jitter
 float2 _PixelOffset;
 
 int _RayBounces;
 
+// lights
 float4 _DirectionalLight;
+
+
+struct Sphere
+{
+    float3 position;
+    float radius;
+    float3 albedo;
+    float3 specular;
+};
+
+// place where cpu stores all spheres
+StructuredBuffer<Sphere> _Spheres;
 
 struct Ray
 {
@@ -31,6 +47,8 @@ struct RayHit
     float3 pos;
     float distance;
     float3 n;
+    float3 albedo;
+    float3 specular;
 };
 
 Ray ConstructRay(float3 origin, float3 direction)
@@ -52,11 +70,11 @@ RayHit ConstructRayHit()
 };
 
 // float4 sphere - x,y,z center, w radius
-void IntersectSphere(Ray ray, inout RayHit bestHit, float4 sphere)
+void IntersectSphere(Ray ray, inout RayHit bestHit, Sphere sphere)
 {
-    float3 d = ray.o - sphere.xyz;
+    float3 d = ray.o - sphere.position;
     float p1 = -dot(ray.d, d);
-    float p2sqr = p1 * p1 - dot(d, d) + sphere.w * sphere.w;
+    float p2sqr = p1 * p1 - dot(d, d) + sphere.radius * sphere.radius;
     if (p2sqr < 0)
         return;
     float p2 = sqrt(p2sqr);
@@ -65,7 +83,9 @@ void IntersectSphere(Ray ray, inout RayHit bestHit, float4 sphere)
     {
         bestHit.distance = t;
         bestHit.pos = ray.o + t * ray.d;
-        bestHit.n = normalize(bestHit.pos - sphere.xyz);
+        bestHit.n = normalize(bestHit.pos - sphere.position);
+        bestHit.albedo = sphere.albedo;
+        bestHit.specular = sphere.specular;
     }
 }
 
@@ -80,6 +100,8 @@ void IntersectGroundPlane(Ray ray, inout RayHit bestHit)
         bestHit.distance = t;
         bestHit.pos = ray.o + t * ray.d;
         bestHit.n = float3(0.0f, 1.0f, 0.0f);
+        bestHit.albedo = 0.8f;
+        bestHit.specular = 0.3f;
     }
 }
 
@@ -102,11 +124,11 @@ RayHit Trace(Ray ray)
     RayHit bestHit = ConstructRayHit();
     // creating a default plane y = 0
     IntersectGroundPlane(ray, bestHit);
-    // creating a Sphere centered at 0, 3, 0 with a radius of 1
-    for (int i = 0; i < 10; ++i)
-    {
-        IntersectSphere(ray, bestHit, float4(2.0f * i, 2.0f, 2.0f * i, 1.0f));
-    }
+
+    uint numSpheres, stride;
+    _Spheres.GetDimensions(numSpheres, stride);
+    for (int i = 0; i < numSpheres; ++i) IntersectSphere(ray, bestHit, _Spheres[i]);
+
     return bestHit;
 }
 
@@ -114,31 +136,28 @@ float3 Shade(inout Ray ray, RayHit hit)
 {
     if (hit.distance < INF)
     {
-        float3 matSpec = float3(0.6f, 0.6f, 0.6f);
-        float3 matAlbedo = float3(0.5f, 0.4f, 0.3f);
         ray.o = hit.pos + hit.n * 0.001f; // floating point precision error, adding an offset along the normal
         ray.d = reflect(ray.d, hit.n);
-        ray.e *= matSpec;
-        
+        ray.e *= hit.specular;
+
         //shadow ray
-        bool shadow = false;
         Ray shadowRay = ConstructRay(hit.pos + hit.n * 0.001f, -1 * _DirectionalLight.xyz);
         RayHit shadowHit = Trace(shadowRay);
         if (shadowHit.distance != INF) return float3(0.0f, 0.0f, 0.0f);
 
-        return saturate(dot(hit.n, _DirectionalLight.xyz) * -1) * _DirectionalLight.w * matAlbedo;
+        return saturate(dot(hit.n, _DirectionalLight.xyz) * -1) * _DirectionalLight.w * hit.albedo;
     }
     else
     {
         ray.e = 0.0f;
-        float theta = acos(ray.d.y) / -PI;
+        float theta = acos(ray.d.y) / -PI;// *_Time;
         float phi = atan2(ray.d.x, -ray.d.z) / -PI * 0.5f;
         return _SkyboxTexture.SampleLevel(sampler_SkyboxTexture, float2(phi, theta), 0).xyz * 1.0f;
     }
 }
 
-[numthreads(8,8,1)]
-void CSMain (uint3 id : SV_DispatchThreadID)
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
 {
     uint w, h;
     // as defined here RayTracingShader.SetTexture(0, "Result", target);
@@ -156,5 +175,6 @@ void CSMain (uint3 id : SV_DispatchThreadID)
         result += ray.e * Shade(ray, hit);
         if (!any(ray.e)) break;
     }
+
     Result[id.xy] = float4(result, 1);
 }
